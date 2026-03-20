@@ -1,0 +1,118 @@
+metadata:
+  title: Modbus descriptor info test fixture
+  version: "1.0"
+
+ios:
+- &bool1
+  id: dummyio1
+  type: dummy
+  dtype: bool
+- &bool2
+  id: dummyio2
+  type: dummy
+  dtype: bool
+- &bool3
+  id: dummyio3
+  type: dummy
+  dtype: bool
+- &packed_bool
+  id: dummyio4
+  type: dummy
+  dtype: bool
+  config:
+    dim: 16
+- &holding16
+  id: dummyio20
+  type: dummy
+  dtype: uint16
+- &holding64
+  id: dummyio21
+  type: dummy
+  dtype: uint64
+- &holding_ro
+  id: dummyio22
+  type: dummy
+  dtype: uint16
+- &input32
+  id: dummyio23
+  type: dummy
+  dtype: uint32
+- &input64
+  id: dummyio24
+  type: dummy
+  dtype: uint64
+- &descriptor_io
+  id: descriptor1
+  type: descriptor
+  dtype: uint32
+- &capabilities_io
+  id: capabilities1
+  type: capabilities
+  dtype: block
+- &fileio
+  id: modbus_fileio1
+  type: fileio
+  dtype: block
+  config:
+    path: "/tmp/dawn_modbus_seekable_fileio.bin"
+    perm: 2
+
+protocols:
+- id: modbus1
+  type: modbus_rtu
+  bindings:
+  - *bool1
+  - *bool2
+  - *bool3
+  - *packed_bool
+  - *holding16
+  - *holding64
+  - *holding_ro
+  - *input32
+  - *input64
+  - *descriptor_io
+  - *capabilities_io
+  - *fileio
+  config:
+    path: /dev/ttyS1
+    registers:
+    - type: coil
+      config: 0
+      start: 0
+      bindings:
+      - *bool1
+      - *bool2
+      - *bool3
+    - type: coil_packed
+      config: 0
+      start: 1000
+      bindings:
+      - *packed_bool
+    - type: holding
+      config: 0
+      start: 2000
+      bindings:
+      - *holding16
+      - *holding64
+      - *holding_ro
+    - type: input
+      config: 0
+      start: 3000
+      bindings:
+      - *input32
+      - *input64
+    - type: seekable
+      config: 256
+      start: 3600
+      bindings:
+      - *descriptor_io
+    - type: seekable
+      config: 256
+      start: 3900
+      bindings:
+      - *capabilities_io
+    - type: seekable
+      config: 256
+      start: 4200
+      bindings:
+      - *fileio

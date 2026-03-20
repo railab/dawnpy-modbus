@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools >= 61.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dawnpy-modbus"
+version = "0.1.0"
+description = "Modbus transport package for Dawn built on top of dawnpy"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "dawnpy",
+  "click>=8.1",
+  "pymodbus>=3.1,<4",
+]
+
+[project.urls]
+Repository = "https://github.com/railab/dawnpy-modbus"
+Documentation = "https://railab.github.io/dawn/tools/dawnpy-modbus.html"
+"Dawn Project" = "https://github.com/railab/dawn"
+
+[project.scripts]
+dawnpy-modbus = "dawnpy_modbus.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["dawnpy_modbus*"]
+
+[tool.setuptools.package-data]
+dawnpy_modbus = ["py.typed"]
+
+[tool.black]
+line-length = 79
+target-version = ["py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 79
