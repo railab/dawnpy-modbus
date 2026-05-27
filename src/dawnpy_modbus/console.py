@@ -30,8 +30,11 @@ from dawnpy_modbus.client import (
     ModbusClient,
     ModbusDescriptorInfo,
     registers_from_value,
+    registers_needed,
     value_from_registers,
 )
+
+MAX_HOLDING_READ_REGS = 125
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +352,9 @@ class ModbusConsole(ConsoleBase):  # pragma: no cover
             )
             return value, extra
 
+        if binding.group_type == "seekable":
+            return self._read_seekable_binding(client, binding)
+
         addr = self._wire_address(binding.start_address)
         response = self._read_binding_response(client, binding, addr)
         if response is None:
@@ -365,7 +371,7 @@ class ModbusConsole(ConsoleBase):  # pragma: no cover
             )
             return None
         try:
-            decoded = value_from_registers(binding.dtype, registers)
+            decoded = self._decode_register_payload(binding, registers)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug(
                 "failed to decode registers dtype=%s registers=%s error=%s",
@@ -404,13 +410,16 @@ class ModbusConsole(ConsoleBase):  # pragma: no cover
             return client.read_discrete_inputs(
                 self.unit, addr, binding.register_count
             )
-        if binding.group_type == "holding":
+        if binding.group_type in ("holding", "seekable"):
             return client.read_holding_registers(
                 self.unit, addr, binding.register_count
             )
-        return client.read_input_registers(
+        response = client.read_input_registers(
             self.unit, addr, binding.register_count
         )
+        if response is not None:
+            return response
+        return self._probe_dynamic_word_binding(client, binding, addr, "input")
 
     def _response_registers(self, response: object) -> list[int] | None:
         registers_obj = cast("Any", getattr(response, "registers", None))
@@ -507,10 +516,144 @@ class ModbusConsole(ConsoleBase):  # pragma: no cover
             return False
         return client.write_registers(self.unit, addr, registers)
 
+    def _probe_dynamic_word_binding(
+        self,
+        client: ModbusClient,
+        binding: ModbusBinding,
+        addr: int,
+        reg_type: str,
+    ) -> object | None:
+        if binding.group_type not in ("holding", "input"):
+            return None
+
+        group = None
+        for info in self.descriptor_infos:
+            for group_candidate in info.register_groups:
+                if group_candidate.index == binding.group_index:
+                    group = group_candidate
+                    break
+            if group is not None:
+                break
+
+        if group is None or len(group.bindings) != 1:
+            return None
+
+        raw = (
+            client.read_holding_registers_raw(
+                self.unit, addr, binding.register_count
+            )
+            if reg_type == "holding"
+            else client.read_input_registers_raw(
+                self.unit, addr, binding.register_count
+            )
+        )
+        if raw is None or getattr(raw, "exception_code", None) != 4:
+            return None
+
+        for count in range(
+            binding.register_count + 1, MAX_HOLDING_READ_REGS + 1
+        ):
+            candidate = (
+                client.read_holding_registers_raw(self.unit, addr, count)
+                if reg_type == "holding"
+                else client.read_input_registers_raw(self.unit, addr, count)
+            )
+            if candidate is None:
+                return None
+            if getattr(candidate, "isError", lambda: False)():
+                if getattr(candidate, "exception_code", None) == 2:
+                    return None
+                continue
+
+            binding.register_count = count
+            return candidate
+
+        return None
+
+    def _decode_register_payload(
+        self, binding: ModbusBinding, registers: list[int]
+    ) -> object:
+        per_value = registers_needed(binding.dtype)
+        if len(registers) <= per_value:
+            return value_from_registers(binding.dtype, registers)
+        if per_value > 0 and len(registers) % per_value == 0:
+            values = []
+            for offset in range(0, len(registers), per_value):
+                values.append(
+                    value_from_registers(
+                        binding.dtype, registers[offset : offset + per_value]
+                    )
+                )
+            return values
+        return registers
+
+    def _read_seekable_binding(
+        self, client: ModbusClient, binding: ModbusBinding
+    ) -> tuple[object, str | None] | None:
+        addr = self._wire_address(binding.start_address)
+        window_regs = max(0, binding.register_count - 1)
+        ctrl_addr = addr + window_regs
+        registers: list[int] = []
+        remain = window_regs
+        chunk_addr = addr
+
+        logger.debug(
+            "reading seekable binding addr=%s wire_addr=%s "
+            "window_regs=%s ctrl=%s unit=%s",
+            binding.start_address,
+            addr,
+            window_regs,
+            ctrl_addr,
+            self.unit,
+        )
+
+        while remain > 0:
+            chunk = min(remain, MAX_HOLDING_READ_REGS)
+            response = client.read_holding_registers(
+                self.unit, chunk_addr, chunk
+            )
+            if response is None:
+                logger.debug(
+                    "seekable chunk read failed addr=%s count=%s",
+                    chunk_addr,
+                    chunk,
+                )
+                return None
+            part = self._response_registers(response)
+            if not part or len(part) < chunk:
+                logger.debug(
+                    "seekable chunk response too short addr=%s "
+                    "count=%s response=%r",
+                    chunk_addr,
+                    chunk,
+                    response,
+                )
+                return None
+            registers.extend(part[:chunk])
+            chunk_addr += chunk
+            remain -= chunk
+
+        ctrl_response = client.read_holding_registers(self.unit, ctrl_addr, 1)
+        ctrl_regs = (
+            self._response_registers(ctrl_response)
+            if ctrl_response is not None
+            else None
+        )
+        offset = ctrl_regs[0] if ctrl_regs else None
+        extra = (
+            f"Seekable window @ wire {addr}: {window_regs} regs"
+            if offset is None
+            else (
+                f"Seekable window @ wire {addr}: {window_regs} regs, "
+                f"offset={offset}"
+            )
+        )
+        return registers, extra
+
     @staticmethod
     def _wire_address(start_address: int) -> int:
         """Convert descriptor register number to Modbus wire address."""
-        return max(0, start_address - 1)
+        return max(0, start_address)
 
     def _parse_value(
         self, raw: str, group_type: str, dtype: str

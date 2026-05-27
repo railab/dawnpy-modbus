@@ -47,6 +47,7 @@ DTYPE_BYTE_SIZES: dict[str, int] = {
 BIT_REGISTER_TYPES = {"coil", "coil_packed", "discrete", "discrete_packed"}
 WORD_REGISTER_TYPES = {"input", "holding"}
 SEEKABLE_REGISTER_TYPES = {"seekable"}
+WRITABLE_REGISTER_TYPES = {"coil", "coil_packed", "holding", "seekable"}
 
 Numeric = SupportsFloat | SupportsInt
 
@@ -327,7 +328,7 @@ class ModbusDescriptorInfo:
                 binding = ModbusBinding(
                     io_id=io_id,
                     dtype=dtype,
-                    rw=io.rw,
+                    rw=reg_type in WRITABLE_REGISTER_TYPES,
                     group_index=idx,
                     group_type=reg_type,
                     start_address=start + offset,
@@ -407,7 +408,13 @@ class ModbusClient:
             client.close()
             self._client = None
 
-    def _call(self, method: str, *args: Any, **kwargs: Any) -> object | None:
+    def _call(
+        self,
+        method: str,
+        *args: Any,
+        allow_error: bool = False,
+        **kwargs: Any,
+    ) -> object | None:
         if not self._client:
             raise RuntimeError("modbus client is not connected")
         fn = getattr(self._client, method, None)
@@ -432,6 +439,8 @@ class ModbusClient:
                 getattr(result, "exception_code", None),
                 getattr(result, "message", None),
             )
+            if allow_error:
+                return result
             return None
         logger.debug("modbus response %s value=%r", method, result)
         return result
@@ -465,6 +474,30 @@ class ModbusClient:
         """Read input registers."""
         return self._call(
             "read_input_registers", address, count=count, device_id=unit
+        )
+
+    def read_holding_registers_raw(
+        self, unit: int, address: int, count: int
+    ) -> object | None:
+        """Read holding registers and return error responses too."""
+        return self._call(
+            "read_holding_registers",
+            address,
+            count=count,
+            device_id=unit,
+            allow_error=True,
+        )
+
+    def read_input_registers_raw(
+        self, unit: int, address: int, count: int
+    ) -> object | None:
+        """Read input registers and return error responses too."""
+        return self._call(
+            "read_input_registers",
+            address,
+            count=count,
+            device_id=unit,
+            allow_error=True,
         )
 
     def write_coil(self, unit: int, address: int, value: bool) -> bool:
