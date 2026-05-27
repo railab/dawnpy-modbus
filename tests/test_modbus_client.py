@@ -19,6 +19,7 @@ from dawnpy_modbus.client import (
     registers_needed,
     value_from_registers,
 )
+from dawnpy_modbus.console import ModbusConsole
 
 
 @pytest.fixture(autouse=True)
@@ -170,6 +171,7 @@ def test_descriptor_info_builds_bindings() -> None:
     assert binding is not None
     assert binding.start_address == 0
     assert binding.group_type.startswith("coil")
+    assert binding.rw is True
     assert len(info.binding_map) == 12
 
     packed = info.get_binding("dummyio4")
@@ -177,12 +179,22 @@ def test_descriptor_info_builds_bindings() -> None:
     assert packed.group_type == "coil_packed"
     assert packed.start_address == 1000
     assert packed.register_count == 16
+    assert packed.rw is True
+
+    holding = info.get_binding("dummyio20")
+    assert holding is not None
+    assert holding.rw is True
+
+    input_binding = info.get_binding("dummyio23")
+    assert input_binding is not None
+    assert input_binding.rw is False
 
     seekable_desc = info.get_binding("descriptor1")
     assert seekable_desc is not None
     assert seekable_desc.group_type == "seekable"
     assert seekable_desc.start_address == 3600
     assert seekable_desc.register_count == 257
+    assert seekable_desc.rw is True
 
     seekable_caps = info.get_binding("capabilities1")
     assert seekable_caps is not None
@@ -342,3 +354,134 @@ def test_modbus_client_unsupported_signature_returns_none() -> None:
     client._client = _NoAddrKwClient()  # type: ignore
     assert client.read_coils(1, 10, 2) is None
     assert _NoAddrKwClient().read_coils(10, count=1).isError() is False
+
+
+class _ChunkClient:
+    def __init__(self):
+        self.calls: list[tuple[str, int, int, int]] = []
+
+    def read_holding_registers(self, unit, address, count):
+        self.calls.append(("holding", unit, address, count))
+        if count == 1 and address == 3856:
+            return _FakeResponse(registers=[512], bits=[])
+        return _FakeResponse(
+            registers=list(range(address, address + count)),
+            bits=[],
+        )
+
+
+class _DynamicInputClient:
+    def __init__(self):
+        self.calls: list[tuple[str, int, int, int]] = []
+
+    def _resp(self, unit, address, count):
+        self.calls.append(("input", unit, address, count))
+        if count < 12:
+            return SimpleNamespace(
+                registers=[],
+                bits=[],
+                exception_code=4,
+                message=None,
+                isError=lambda: True,
+            )
+        if count > 12:
+            return SimpleNamespace(
+                registers=[],
+                bits=[],
+                exception_code=2,
+                message=None,
+                isError=lambda: True,
+            )
+        return _FakeResponse(registers=list(range(12)), bits=[])
+
+    def read_input_registers(self, unit, address, count):
+        response = self._resp(unit, address, count)
+        if response.isError():
+            return None
+        return response
+
+    def read_input_registers_raw(self, unit, address, count):
+        return self._resp(unit, address, count)
+
+
+def test_console_wire_address_preserves_descriptor_address() -> None:
+    console = ModbusConsole.__new__(ModbusConsole)
+    assert console._wire_address(2000) == 2000
+    assert console._wire_address(3600) == 3600
+
+
+def test_console_read_seekable_uses_holding_and_chunks() -> None:
+    console = ModbusConsole.__new__(ModbusConsole)
+    console.unit = 1
+    console.descriptor_infos = []
+    binding = SimpleNamespace(
+        io_id="descriptor1",
+        dtype="uint32",
+        rw=True,
+        group_index=0,
+        group_type="seekable",
+        start_address=3600,
+        register_count=257,
+    )
+    client = _ChunkClient()
+
+    result = console._read_binding(0, client, binding)
+
+    assert result is not None
+    value, extra = result
+    assert isinstance(value, list)
+    assert len(value) == 256
+    assert value[:3] == [3600, 3601, 3602]
+    assert extra == "Seekable window @ wire 3600: 256 regs, offset=512"
+    assert client.calls == [
+        ("holding", 1, 3600, 125),
+        ("holding", 1, 3725, 125),
+        ("holding", 1, 3850, 6),
+        ("holding", 1, 3856, 1),
+    ]
+
+
+def test_console_dynamic_input_binding_probes_full_width_and_decodes_vector():
+    console = ModbusConsole.__new__(ModbusConsole)
+    console.unit = 1
+    console.descriptor_infos = [
+        SimpleNamespace(
+            register_groups=[
+                SimpleNamespace(
+                    index=0, bindings=[SimpleNamespace(io_id="adc0")]
+                )
+            ]
+        )
+    ]
+    binding = SimpleNamespace(
+        io_id="adc0",
+        dtype="uint32",
+        rw=False,
+        group_index=0,
+        group_type="input",
+        start_address=512,
+        register_count=2,
+    )
+    client = _DynamicInputClient()
+
+    result = console._read_binding(0, client, binding)
+
+    assert result is not None
+    value, extra = result
+    assert value == [1, 131075, 262149, 393223, 524297, 655371]
+    assert extra is None
+    assert binding.register_count == 12
+    assert client.calls == [
+        ("input", 1, 512, 2),
+        ("input", 1, 512, 2),
+        ("input", 1, 512, 3),
+        ("input", 1, 512, 4),
+        ("input", 1, 512, 5),
+        ("input", 1, 512, 6),
+        ("input", 1, 512, 7),
+        ("input", 1, 512, 8),
+        ("input", 1, 512, 9),
+        ("input", 1, 512, 10),
+        ("input", 1, 512, 11),
+        ("input", 1, 512, 12),
+    ]
