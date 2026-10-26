@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# tools/dawnpy/src/dawnpy/modbus/console.py
+# tools/dawnpy-modbus/src/dawnpy_modbus/console.py
 #
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -33,6 +33,7 @@ from dawnpy_modbus.client import (
     registers_needed,
     value_from_registers,
 )
+from dawnpy_modbus.files import SeekableFile
 
 MAX_HOLDING_READ_REGS = 125
 
@@ -90,6 +91,7 @@ class ModbusConsole(ConsoleBase):  # pragma: no cover
         self.objid_resolver = ObjectIdResolver()
         self.descriptor_infos: list[ModbusDescriptorInfo] = []
         self.clients: list[ModbusClient] = []
+        self._seekable_offsets: dict[tuple[int, int], int] = {}
         self._setup_clients()
         self._objid_maps = self._build_objid_maps()
 
@@ -410,7 +412,7 @@ class ModbusConsole(ConsoleBase):  # pragma: no cover
             return client.read_discrete_inputs(
                 self.unit, addr, binding.register_count
             )
-        if binding.group_type in ("holding", "seekable"):
+        if binding.group_type in ("holding",):
             return client.read_holding_registers(
                 self.unit, addr, binding.register_count
             )
@@ -514,6 +516,18 @@ class ModbusConsole(ConsoleBase):  # pragma: no cover
         except ValueError as exc:
             self.warn(str(exc))
             return False
+        if binding.group_type == "seekable":
+            try:
+                data = b"".join(
+                    word.to_bytes(2, "little") for word in registers
+                )
+                key = (id(client), binding.start_address)
+                offset = self._seekable_offsets.get(key, 0)
+                self._seekable_file(client, binding).write(offset, data)
+                return True
+            except (OSError, ValueError) as exc:
+                self.warn(str(exc))
+                return False
         return client.write_registers(self.unit, addr, registers)
 
     def _probe_dynamic_word_binding(
@@ -590,65 +604,35 @@ class ModbusConsole(ConsoleBase):  # pragma: no cover
     def _read_seekable_binding(
         self, client: ModbusClient, binding: ModbusBinding
     ) -> tuple[object, str | None] | None:
-        addr = self._wire_address(binding.start_address)
-        window_regs = max(0, binding.register_count - 1)
-        ctrl_addr = addr + window_regs
-        registers: list[int] = []
-        remain = window_regs
-        chunk_addr = addr
+        """Read the existing seekable window through file records."""
+        key = (id(client), binding.start_address)
+        offset = self._seekable_offsets.get(key, 0)
+        width = (binding.register_count - 1) * 2
+        try:
+            data = self._seekable_file(client, binding).read(offset, width)
+        except (OSError, ValueError) as exc:
+            self.warn(str(exc))
+            return None
+        registers = [
+            int.from_bytes(data[i : i + 2], "little")
+            for i in range(0, width, 2)
+        ]
+        self._seekable_offsets[key] = offset + width
+        return registers, (
+            f"Seekable window @ wire {binding.start_address}: "
+            f"{binding.register_count - 1} regs, offset={offset + width}"
+        )
 
-        logger.debug(
-            "reading seekable binding addr=%s wire_addr=%s "
-            "window_regs=%s ctrl=%s unit=%s",
-            binding.start_address,
-            addr,
-            window_regs,
-            ctrl_addr,
+    def _seekable_file(
+        self, client: ModbusClient, binding: ModbusBinding
+    ) -> SeekableFile:
+        """Build the file allocation for a seekable binding."""
+        return SeekableFile(
+            client,
             self.unit,
+            binding.start_address + 1,
+            binding.register_count,
         )
-
-        while remain > 0:
-            chunk = min(remain, MAX_HOLDING_READ_REGS)
-            response = client.read_holding_registers(
-                self.unit, chunk_addr, chunk
-            )
-            if response is None:
-                logger.debug(
-                    "seekable chunk read failed addr=%s count=%s",
-                    chunk_addr,
-                    chunk,
-                )
-                return None
-            part = self._response_registers(response)
-            if not part or len(part) < chunk:
-                logger.debug(
-                    "seekable chunk response too short addr=%s "
-                    "count=%s response=%r",
-                    chunk_addr,
-                    chunk,
-                    response,
-                )
-                return None
-            registers.extend(part[:chunk])
-            chunk_addr += chunk
-            remain -= chunk
-
-        ctrl_response = client.read_holding_registers(self.unit, ctrl_addr, 1)
-        ctrl_regs = (
-            self._response_registers(ctrl_response)
-            if ctrl_response is not None
-            else None
-        )
-        offset = ctrl_regs[0] if ctrl_regs else None
-        extra = (
-            f"Seekable window @ wire {addr}: {window_regs} regs"
-            if offset is None
-            else (
-                f"Seekable window @ wire {addr}: {window_regs} regs, "
-                f"offset={offset}"
-            )
-        )
-        return registers, extra
 
     @staticmethod
     def _wire_address(start_address: int) -> int:
