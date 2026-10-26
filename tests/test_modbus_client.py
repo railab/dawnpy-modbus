@@ -1,4 +1,4 @@
-# tools/dawnpy/tests/test_modbus_client.py
+# tools/dawnpy-modbus/tests/test_modbus_client.py
 #
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -410,35 +410,34 @@ def test_console_wire_address_preserves_descriptor_address() -> None:
     assert console._wire_address(3600) == 3600
 
 
-def test_console_read_seekable_uses_holding_and_chunks() -> None:
+def test_console_read_seekable_keeps_window_api_with_file_records(monkeypatch):
     console = ModbusConsole.__new__(ModbusConsole)
     console.unit = 1
-    console.descriptor_infos = []
+    console._seekable_offsets = {}
     binding = SimpleNamespace(
-        io_id="descriptor1",
-        dtype="uint32",
-        rw=True,
-        group_index=0,
         group_type="seekable",
         start_address=3600,
         register_count=257,
     )
-    client = _ChunkClient()
+    calls = []
 
+    def read(offset, size):
+        calls.append((offset, size))
+        return b"\x10\x0e\x11\x0e\x12\x0e".ljust(size, b"\0")
+
+    monkeypatch.setattr(
+        console, "_seekable_file", lambda *_: SimpleNamespace(read=read)
+    )
+    client = object()
     result = console._read_binding(0, client, binding)
-
     assert result is not None
     value, extra = result
-    assert isinstance(value, list)
-    assert len(value) == 256
+    assert isinstance(value, list) and len(value) == 256
     assert value[:3] == [3600, 3601, 3602]
+    assert value[3:] == [0] * 253
     assert extra == "Seekable window @ wire 3600: 256 regs, offset=512"
-    assert client.calls == [
-        ("holding", 1, 3600, 125),
-        ("holding", 1, 3725, 125),
-        ("holding", 1, 3850, 6),
-        ("holding", 1, 3856, 1),
-    ]
+    console._read_seekable_binding(client, binding)
+    assert calls == [(0, 512), (512, 512)]
 
 
 def test_console_dynamic_input_binding_probes_full_width_and_decodes_vector():

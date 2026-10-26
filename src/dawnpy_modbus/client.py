@@ -1,4 +1,4 @@
-# tools/dawnpy/src/dawnpy/modbus/client.py
+# tools/dawnpy-modbus/src/dawnpy_modbus/client.py
 #
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -22,6 +22,7 @@ from typing import (
 
 from dawnpy.descriptor.support.utils import resolve_references
 from pymodbus.client import ModbusSerialClient
+from pymodbus.pdu.file_message import FileRecord
 
 if TYPE_CHECKING:
     from dawnpy.descriptor.client import ClientDescriptor
@@ -513,3 +514,28 @@ class ModbusClient:
             "write_registers", address, list(values), device_id=unit
         )
         return result is not None
+
+    def read_file_records(
+        self, unit: int, number: int, record: int, count: int
+    ) -> bytes:
+        """Read one FC20 record group, preserving file byte order."""
+        request = FileRecord(
+            file_number=number, record_number=record, record_length=count * 2
+        )
+        response = self._call("read_file_record", [request], device_id=unit)
+        records = getattr(response, "records", [])
+        if len(records) != 1 or len(records[0].record_data) != count * 2:
+            raise OSError("invalid or failed FC20 response")
+        return bytes(records[0].record_data)
+
+    def write_file_records(
+        self, unit: int, number: int, record: int, data: bytes
+    ) -> None:
+        """Write one FC21 group and validate the echoed data and address."""
+        request = FileRecord(
+            file_number=number, record_number=record, record_data=data
+        )
+        response = self._call("write_file_record", [request], device_id=unit)
+        records = getattr(response, "records", [])
+        if len(records) != 1 or records[0] != request:
+            raise OSError("invalid or failed FC21 response")
